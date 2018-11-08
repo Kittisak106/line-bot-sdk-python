@@ -1,41 +1,26 @@
 # -*- coding: utf-8 -*-
+
+#  Licensed under the Apache License, Version 2.0 (the "License"); you may
+#  not use this file except in compliance with the License. You may obtain
+#  a copy of the License at
 #
-#     Author : Suphakit Annoppornchai
-#     Date   : Apr 8 2017
-#     Name   : line bot
+#       http://www.apache.org/licenses/LICENSE-2.0
 #
-#          https://saixiii.ddns.net
-# 
-# Copyright (C) 2017  Suphakit Annoppornchai
-# 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-# 
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-# 
-# You should have received a copy of the GNU General Public License
-# along with this program.
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+#  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+#  License for the specific language governing permissions and limitations
+#  under the License.
 
 from __future__ import unicode_literals
 
-import sys
-import os
-import json
 import errno
-import time
-import thread
+import os
+import sys
 import tempfile
-import logging
-from logging.handlers import RotatingFileHandler
-from time import strftime
 from argparse import ArgumentParser
-from kafka import KafkaConsumer
-from kafka.errors import KafkaError
+
+from flask import Flask, request, abort
 
 from linebot import (
     LineBotApi, WebhookHandler
@@ -54,39 +39,11 @@ from linebot.models import (
     UnfollowEvent, FollowEvent, JoinEvent, LeaveEvent, BeaconEvent
 )
 
-#-------------------------------------------------------------------------------
-#     G L O B A L    V A R I A B L E S
-#-------------------------------------------------------------------------------
-
-botname = 'Saixiii'
-botcall = '-'
-botlen  = len(botcall)
-
-processpool = 5
+app = Flask(__name__)
 
 # get channel_secret and channel_access_token from your environment variable
-channel_secret = '04340bfadf47123a7d1712a11b650dd6'
-channel_access_token = 'C0jYgehR6Baz7bFAvDfO3L671u5Gdk5ms5mUZ5aes7M29+hxXhLoRRYrWDSO6IedYdll3tzLIvZMhIK4cOc5LrSBVMkcZzoYS4AwSg13+B5K42GU5eC4y7sh7N9vNbTTs+MpSsA3pM2I7pbsFOlV1QdB04t89/1O/w1cDnyilFU='
-signature = 'Suphakit Annoppornchai'
-
-# Log file configuration
-static_tmp_path = '/app/python/Line/log/content'
-chat_file = '/app/python/Line/log/' + botname + '.msg'
-app_file = '/app/python/Line/log/' + botname + '.log'
-log_size = 1024 * 1024 * 10
-log_backup = 50
-log_format = '[%(asctime)s] [%(levelname)s] - %(message)s'
-log_mode = logging.DEBUG
-
-# Kafka configuration
-kafka_topic = 'line-saixiii'
-kafka_ip = 'saixiii.ddns.net'
-kafka_port = '9092'
-
-#-------------------------------------------------------------------------------
-#     I N I T I A L    P R O G R A M
-#-------------------------------------------------------------------------------
-
+channel_secret = os.getenv('04340bfadf47123a7d1712a11b650dd6', None)
+channel_access_token = os.getenv('C0jYgehR6Baz7bFAvDfO3L671u5Gdk5ms5mUZ5aes7M29+hxXhLoRRYrWDSO6IedYdll3tzLIvZMhIK4cOc5LrSBVMkcZzoYS4AwSg13+B5K42GU5eC4y7sh7N9vNbTTs+MpSsA3pM2I7pbsFOlV1QdB04t89/1O/w1cDnyilFU=', None)
 if channel_secret is None:
     print('Specify LINE_CHANNEL_SECRET as environment variable.')
     sys.exit(1)
@@ -97,22 +54,8 @@ if channel_access_token is None:
 line_bot_api = LineBotApi(channel_access_token)
 handler = WebhookHandler(channel_secret)
 
-#-------------------------------------------------------------------------------
-#     F U N C T I O N S
-#-------------------------------------------------------------------------------
+static_tmp_path = os.path.join(os.path.dirname(__file__), 'static', 'tmp')
 
-# convert epoch date to date time
-def convert_epoch(epoch):
-  sec = float(epoch) / 1000
-  dt = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(sec))
-  return str(dt)
-
-# Function check call bot
-def chkcall(msg):
-	if msg != None and msg[:botlen].lower() == botcall:
-		return True
-	else:
-		return False
 
 # function for create tmp dir for download content
 def make_static_tmp_dir():
@@ -123,50 +66,31 @@ def make_static_tmp_dir():
             pass
         else:
             raise
-            
 
-# create logger moule
-def setup_logger(logger_name, log_file, level=logging.INFO):
-    l = logging.getLogger(logger_name)
-    formatter = logging.Formatter(log_format)
-    fileHandler = RotatingFileHandler(log_file, maxBytes=log_size, backupCount=log_backup)
-    fileHandler.setFormatter(formatter)
-    streamHandler = logging.StreamHandler()
-    streamHandler.setFormatter(formatter)
 
-    l.setLevel(level)
-    l.addHandler(fileHandler)
-    l.addHandler(streamHandler)
+@app.route("/callback", methods=['POST'])
+def callback():
+    # get X-Line-Signature header value
+    signature = request.headers['X-Line-Signature']
 
-# get source id of user, group, room
-def get_sourceid(event):
-    if isinstance(event.source, SourceUser):
-      profile = line_bot_api.get_profile(event.source.user_id)
-      return profile.user_id
-    elif isinstance(event.source, SourceGroup):
-    	return event.source.group_id
-    elif isinstance(event.source, SourceRoom):
-    	return event.source.room_id
-    	
-   
-# push message
-def reply_message(event,msg):
-    if isinstance(event.source, SourceUser):
-      profile = line_bot_api.get_profile(event.source.user_id)
-      line_bot_api.push_message(profile.user_id, TextSendMessage(text=msg))
-    elif isinstance(event.source, SourceGroup):
-    	line_bot_api.push_message(event.source.group_id, TextSendMessage(text=msg))
-    elif isinstance(event.source, SourceRoom):
-    	line_bot_api.push_message(event.source.room_id, TextSendMessage(text=msg))
+    # get request body as text
+    body = request.get_data(as_text=True)
+    app.logger.info("Request body: " + body)
 
+    # handle webhook body
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        abort(400)
+
+    return 'OK'
 
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_text_message(event):
-    msg = event.message.text
-    if not chkcall(msg): return
-    msg = msg[len(msg.split(' ', 1)[0])+1:]
-    if msg == 'profile':
+    text = event.message.text
+
+    if text == 'profile':
         if isinstance(event.source, SourceUser):
             profile = line_bot_api.get_profile(event.source.user_id)
             line_bot_api.reply_message(
@@ -183,7 +107,7 @@ def handle_text_message(event):
             line_bot_api.reply_message(
                 event.reply_token,
                 TextMessage(text="Bot can't use profile API without user ID"))
-    elif msg == 'bye':
+    elif text == 'bye':
         if isinstance(event.source, SourceGroup):
             line_bot_api.reply_message(
                 event.reply_token, TextMessage(text='Leaving group'))
@@ -196,7 +120,7 @@ def handle_text_message(event):
             line_bot_api.reply_message(
                 event.reply_token,
                 TextMessage(text="Bot can't leave from 1:1 chat"))
-    elif msg == 'confirm':
+    elif text == 'confirm':
         confirm_template = ConfirmTemplate(text='Do it?', actions=[
             MessageTemplateAction(label='Yes', text='Yes!'),
             MessageTemplateAction(label='No', text='No!'),
@@ -204,7 +128,7 @@ def handle_text_message(event):
         template_message = TemplateSendMessage(
             alt_text='Confirm alt text', template=confirm_template)
         line_bot_api.reply_message(event.reply_token, template_message)
-    elif msg == 'buttons':
+    elif text == 'buttons':
         buttons_template = ButtonsTemplate(
             title='My buttons sample', text='Hello, my buttons', actions=[
                 URITemplateAction(
@@ -218,7 +142,7 @@ def handle_text_message(event):
         template_message = TemplateSendMessage(
             alt_text='Buttons alt text', template=buttons_template)
         line_bot_api.reply_message(event.reply_token, template_message)
-    elif msg == 'carousel':
+    elif text == 'carousel':
         carousel_template = CarouselTemplate(columns=[
             CarouselColumn(text='hoge1', title='fuga1', actions=[
                 URITemplateAction(
@@ -235,11 +159,11 @@ def handle_text_message(event):
         template_message = TemplateSendMessage(
             alt_text='Buttons alt text', template=carousel_template)
         line_bot_api.reply_message(event.reply_token, template_message)
-    elif msg == 'id':
-        msg = event.source.type + ':' + get_sourceid(event)
-        line_bot_api.push_message(get_sourceid(event), TextMessage(text=msg))
-    elif msg:
-        line_bot_api.push_message(get_sourceid(event), TextMessage(text=msg))
+    elif text == 'imagemap':
+        pass
+    else:
+        line_bot_api.reply_message(
+            event.reply_token, TextSendMessage(text=event.message.text))
 
 
 @handler.add(MessageEvent, message=LocationMessage)
@@ -264,7 +188,7 @@ def handle_sticker_message(event):
 
 
 # Other Message Type
-#@handler.add(MessageEvent, message=(ImageMessage, VideoMessage, AudioMessage))
+@handler.add(MessageEvent, message=(ImageMessage, VideoMessage, AudioMessage))
 def handle_content_message(event):
     if isinstance(event.message, ImageMessage):
         ext = 'jpg'
@@ -288,7 +212,7 @@ def handle_content_message(event):
     line_bot_api.reply_message(
         event.reply_token, [
             TextSendMessage(text='Save content.'),
-            TextSendMessage(text=request.host_url + os.path.join('static', 'content', dist_name))
+            TextSendMessage(text=request.host_url + os.path.join('static', 'tmp', dist_name))
         ])
 
 
@@ -329,39 +253,15 @@ def handle_beacon(event):
         TextSendMessage(text='Got beacon event. hwid=' + event.beacon.hwid))
 
 
-def main():
-    
-    setup_logger('app', app_file, log_mode)
-    setup_logger('chat', chat_file)
-    app = logging.getLogger('app')
-    chat = logging.getLogger('chat')
+if __name__ == "__main__":
+    arg_parser = ArgumentParser(
+        usage='Usage: python ' + __file__ + ' [--port <port>] [--help]'
+    )
+    arg_parser.add_argument('-p', '--port', default=8000, help='port')
+    arg_parser.add_argument('-d', '--debug', default=False, help='debug')
+    options = arg_parser.parse_args()
 
     # create tmp dir for download content
     make_static_tmp_dir()
-    
-    # create kafka consumer instance
-    consumer = KafkaConsumer(kafka_topic,group_id=botname,bootstrap_servers=[kafka_ip + ':' + kafka_port],value_deserializer=lambda m: json.loads(m.decode('utf-8')))
-    
-    # consuming data
-    try:
-        for message in consumer:
-          app.debug("%s:%d:%d: key=%s value=%s" % (message.topic, message.partition,
-                                                message.offset, message.key,
-                                                message.value))
-          chat.info(message.value)
-          body = json.dumps(message.value, ensure_ascii=False)
-          thread.start_new_thread(handler.handle,(body,signature,))
-          
-    except KafkaError as e:
-        app.error('kafka error %s: %s' % (str(e), type(e)))
-    except Exception as e:
-        app.error('exception %s: %s' % (str(e), type(e)))
-        raise
-    	
-    # run
-    
-    
-    
-    
-if '__main__' == __name__:
-    main()
+
+    app.run(debug=options.debug, port=options.port)
